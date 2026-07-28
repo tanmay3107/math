@@ -36,6 +36,8 @@ if __name__ == "__main__":
     similarity = VectorMetrics.cosine_similarity(v1, v2)
     print(f"Cosine Similarity between {v1} and {v2}: {similarity:.4f}")import math
 
+import math
+
 class VectorMetrics:
     """A utility class for core vector distance and similarity calculations."""
     
@@ -65,9 +67,25 @@ class VectorMetrics:
             
         return cls.dot_product(vec_a, vec_b) / (mag_a * mag_b)
 
+    @staticmethod
+    def euclidean_distance(vec_a: list[float], vec_b: list[float]) -> float:
+        """Calculates the Euclidean distance (L2 norm distance) between two vectors."""
+        if len(vec_a) != len(vec_b):
+            raise ValueError("Vectors must be of the same length.")
+        return math.sqrt(sum((a - b) ** 2 for a, b in zip(vec_a, vec_b)))
+
+    @staticmethod
+    def manhattan_distance(vec_a: list[float], vec_b: list[float]) -> float:
+        """Calculates the Manhattan distance (L1 norm distance) between two vectors."""
+        if len(vec_a) != len(vec_b):
+            raise ValueError("Vectors must be of the same length.")
+        return sum(abs(a - b) for a, b in zip(vec_a, vec_b))
+
+
 if __name__ == "__main__":
-    # Quick sanity check
     v1 = [1.0, 2.0, 3.0]
     v2 = [4.0, 5.0, 6.0]
-    similarity = VectorMetrics.cosine_similarity(v1, v2)
-    print(f"Cosine Similarity between {v1} and {v2}: {similarity:.4f}")
+    
+    print(f"Cosine Similarity: {VectorMetrics.cosine_similarity(v1, v2):.4f}")
+    print(f"Euclidean Distance: {VectorMetrics.euclidean_distance(v1, v2):.4f}")
+    print(f"Manhattan Distance: {VectorMetrics.manhattan_distance(v1, v2):.4f}")
