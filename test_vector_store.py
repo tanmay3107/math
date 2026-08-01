@@ -1,94 +1,90 @@
-import json
-from typing import Dict, List, Any, Optional
-from metrics import VectorMetrics
+import unittest
+import os
+import tempfile
+from vector_store import VectorStore
 
-class VectorStore:
-    """Lightweight in-memory vector database with JSON persistence and similarity search."""
+class TestVectorStore(unittest.TestCase):
+    """Unit tests for the VectorStore class, including persistence methods."""
 
-    def __init__(self):
-        self._vectors: Dict[str, List[float]] = {}
-        self._metadata: Dict[str, Dict[str, Any]] = {}
+    def setUp(self):
+        self.store = VectorStore()
+        self.vec1 = [1.0, 0.0, 0.0]
+        self.vec2 = [0.0, 1.0, 0.0]
+        self.vec3 = [0.7071, 0.7071, 0.0]
+        # Create a temporary directory for test file I/O
+        self.temp_dir = tempfile.TemporaryDirectory()
 
-    def add(self, vector_id: str, vector: List[float], metadata: Optional[Dict[str, Any]] = None) -> None:
-        """Adds or updates a vector with optional metadata in the store."""
-        self._vectors[vector_id] = vector
-        if metadata is not None:
-            self._metadata[vector_id] = metadata
+    def tearDown(self):
+        # Clean up temporary directory after tests complete
+        self.temp_dir.cleanup()
 
-    def get(self, vector_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieves a vector and its associated metadata by ID."""
-        if vector_id not in self._vectors:
-            return None
-        return {
-            "id": vector_id,
-            "vector": self._vectors[vector_id],
-            "metadata": self._metadata.get(vector_id, {})
-        }
+    def test_add_and_get(self):
+        self.store.add("item_1", self.vec1, {"category": "A"})
+        retrieved = self.store.get("item_1")
+        
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved["id"], "item_1")
+        self.assertEqual(retrieved["vector"], self.vec1)
+        self.assertEqual(retrieved["metadata"], {"category": "A"})
 
-    def search(self, query_vector: List[float], k: int = 3, metric: str = "cosine") -> List[Dict[str, Any]]:
-        """
-        Searches for the top-k nearest vectors using the specified metric.
-        Supported metrics: 'cosine', 'euclidean', 'manhattan'.
-        """
-        if not self._vectors:
-            return []
+    def test_get_nonexistent(self):
+        self.assertIsNone(self.store.get("missing_id"))
 
-        results = []
-        for vec_id, vec in self._vectors.items():
-            if metric == "cosine":
-                score = VectorMetrics.cosine_similarity(query_vector, vec)
-            elif metric == "euclidean":
-                score = VectorMetrics.euclidean_distance(query_vector, vec)
-            elif metric == "manhattan":
-                score = VectorMetrics.manhattan_distance(query_vector, vec)
-            else:
-                raise ValueError(f"Unsupported metric: {metric}. Choose 'cosine', 'euclidean', or 'manhattan'.")
+    def test_search_cosine_ordering(self):
+        self.store.add("vec1", self.vec1)
+        self.store.add("vec2", self.vec2)
+        self.store.add("vec3", self.vec3)
 
-            results.append({
-                "id": vec_id,
-                "score": score,
-                "metadata": self._metadata.get(vec_id, {})
-            })
+        results = self.store.search([0.9, 0.1, 0.0], k=2, metric="cosine")
+        
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["id"], "vec1")
+        self.assertEqual(results[1]["id"], "vec3")
+        self.assertGreater(results[0]["score"], results[1]["score"])
 
-        reverse_sort = (metric == "cosine")
-        results.sort(key=lambda item: item["score"], reverse=reverse_sort)
+    def test_search_distance_ordering(self):
+        self.store.add("vec1", self.vec1)
+        self.store.add("vec2", self.vec2)
 
-        return results[:k]
+        results_euc = self.store.search([0.9, 0.0, 0.0], k=2, metric="euclidean")
+        self.assertEqual(results_euc[0]["id"], "vec1")
+        self.assertLess(results_euc[0]["score"], results_euc[1]["score"])
 
-    def save_to_json(self, filepath: str) -> None:
-        """Saves the current state of vectors and metadata to a JSON file."""
-        data = {
-            "vectors": self._vectors,
-            "metadata": self._metadata
-        }
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        results_man = self.store.search([0.9, 0.0, 0.0], k=2, metric="manhattan")
+        self.assertEqual(results_man[0]["id"], "vec1")
+        self.assertLess(results_man[0]["score"], results_man[1]["score"])
 
-    def load_from_json(self, filepath: str) -> None:
-        """Loads state into the current instance from a JSON file."""
-        with open(filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        self._vectors = data.get("vectors", {})
-        self._metadata = data.get("metadata", {})
+    def test_empty_search(self):
+        results = self.store.search([1.0, 0.0, 0.0], k=3)
+        self.assertEqual(results, [])
 
-    @classmethod
-    def from_json(cls, filepath: str) -> "VectorStore":
-        """Factory method to construct a new VectorStore instance from a JSON file."""
-        store = cls()
-        store.load_from_json(filepath)
-        return store
+    def test_invalid_metric_raises_error(self):
+        self.store.add("vec1", self.vec1)
+        with self.assertRaises(ValueError):
+            self.store.search(self.vec1, metric="invalid_metric")
 
+    def test_save_and_load_json(self):
+        self.store.add("vec1", self.vec1, {"category": "math"})
+        self.store.add("vec2", self.vec2, {"category": "physics"})
+
+        filepath = os.path.join(self.temp_dir.name, "test_store.json")
+        self.store.save_to_json(filepath)
+
+        # Verify loading into a clean instance restores state accurately
+        new_store = VectorStore()
+        new_store.load_from_json(filepath)
+
+        self.assertEqual(new_store.get("vec1"), self.store.get("vec1"))
+        self.assertEqual(new_store.get("vec2"), self.store.get("vec2"))
+
+    def test_from_json_factory(self):
+        self.store.add("vec1", self.vec1, {"category": "math"})
+        filepath = os.path.join(self.temp_dir.name, "test_store_factory.json")
+        self.store.save_to_json(filepath)
+
+        # Verify class factory method constructs and populates store
+        loaded_store = VectorStore.from_json(filepath)
+        self.assertEqual(loaded_store.get("vec1"), self.store.get("vec1"))
 
 if __name__ == "__main__":
-    # Test saving and loading
-    store = VectorStore()
-    store.add("doc_1", [0.9, 0.1, 0.0], {"title": "Introduction to AI"})
-    store.add("doc_2", [0.0, 0.1, 0.95], {"title": "Baking Sourdough Bread"})
-
-    # Save to disk
-    store.save_to_json("vector_store_backup.json")
-    print("Saved store to vector_store_backup.json")
-
-    # Load from disk into a fresh instance
-    new_store = VectorStore.from_json("vector_store_backup.json")
-    print("Loaded document from file:", new_store.get("doc_1"))
+    unittest.main()
