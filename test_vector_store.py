@@ -1,21 +1,21 @@
 import unittest
 import os
 import tempfile
+import math
 from vector_store import VectorStore
+from metrics import VectorMetrics
 
 class TestVectorStore(unittest.TestCase):
-    """Unit tests for the VectorStore class, including persistence methods."""
+    """Unit tests for the VectorStore class, including persistence, normalization, and batch operations."""
 
     def setUp(self):
         self.store = VectorStore()
         self.vec1 = [1.0, 0.0, 0.0]
         self.vec2 = [0.0, 1.0, 0.0]
         self.vec3 = [0.7071, 0.7071, 0.0]
-        # Create a temporary directory for test file I/O
         self.temp_dir = tempfile.TemporaryDirectory()
 
     def tearDown(self):
-        # Clean up temporary directory after tests complete
         self.temp_dir.cleanup()
 
     def test_add_and_get(self):
@@ -70,7 +70,6 @@ class TestVectorStore(unittest.TestCase):
         filepath = os.path.join(self.temp_dir.name, "test_store.json")
         self.store.save_to_json(filepath)
 
-        # Verify loading into a clean instance restores state accurately
         new_store = VectorStore()
         new_store.load_from_json(filepath)
 
@@ -82,9 +81,45 @@ class TestVectorStore(unittest.TestCase):
         filepath = os.path.join(self.temp_dir.name, "test_store_factory.json")
         self.store.save_to_json(filepath)
 
-        # Verify class factory method constructs and populates store
         loaded_store = VectorStore.from_json(filepath)
         self.assertEqual(loaded_store.get("vec1"), self.store.get("vec1"))
+
+    def test_vector_normalization(self):
+        # [3.0, 4.0, 0.0] normalized has unit magnitude 1.0 -> [0.6, 0.8, 0.0]
+        self.store.add("norm_vec", [3.0, 4.0, 0.0], normalize=True)
+        retrieved = self.store.get("norm_vec")
+        
+        self.assertIsNotNone(retrieved)
+        self.assertAlmostEqual(VectorMetrics.magnitude(retrieved["vector"]), 1.0)
+        self.assertAlmostEqual(retrieved["vector"][0], 0.6)
+        self.assertAlmostEqual(retrieved["vector"][1], 0.8)
+
+    def test_normalize_zero_vector_raises(self):
+        with self.assertRaises(ValueError):
+            self.store.add("zero", [0.0, 0.0, 0.0], normalize=True)
+
+    def test_add_batch(self):
+        batch = [
+            {"id": "b1", "vector": [3.0, 4.0, 0.0], "metadata": {"tag": "first"}},
+            {"id": "b2", "vector": [0.0, 5.0, 0.0], "metadata": {"tag": "second"}}
+        ]
+        self.store.add_batch(batch, normalize=True)
+
+        item1 = self.store.get("b1")
+        item2 = self.store.get("b2")
+
+        self.assertIsNotNone(item1)
+        self.assertIsNotNone(item2)
+        self.assertAlmostEqual(VectorMetrics.magnitude(item1["vector"]), 1.0)
+        self.assertAlmostEqual(VectorMetrics.magnitude(item2["vector"]), 1.0)
+        self.assertEqual(item1["metadata"]["tag"], "first")
+
+    def test_add_batch_invalid_record_raises(self):
+        invalid_batch = [
+            {"vector": [1.0, 2.0, 3.0]}  # Missing required 'id' key
+        ]
+        with self.assertRaises(KeyError):
+            self.store.add_batch(invalid_batch)
 
 if __name__ == "__main__":
     unittest.main()
