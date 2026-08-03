@@ -1,18 +1,55 @@
+import json
 from typing import Dict, List, Any, Optional
 from metrics import VectorMetrics
 
 class VectorStore:
-    """Lightweight in-memory vector database for similarity search."""
+    """Lightweight in-memory vector database with persistence, batch operations, and normalization."""
 
     def __init__(self):
         self._vectors: Dict[str, List[float]] = {}
         self._metadata: Dict[str, Dict[str, Any]] = {}
 
-    def add(self, vector_id: str, vector: List[float], metadata: Optional[Dict[str, Any]] = None) -> None:
-        """Adds or updates a vector with optional metadata in the store."""
+    @staticmethod
+    def _normalize_vector(vector: List[float]) -> List[float]:
+        """Helper to convert a vector into a unit vector (L2 normalization)."""
+        mag = VectorMetrics.magnitude(vector)
+        if mag == 0:
+            raise ValueError("Cannot normalize a zero vector.")
+        return [v / mag for v in vector]
+
+    def add(
+        self, 
+        vector_id: str, 
+        vector: List[float], 
+        metadata: Optional[Dict[str, Any]] = None,
+        normalize: bool = False
+    ) -> None:
+        """Adds or updates a vector with optional metadata and optional L2 normalization."""
+        if normalize:
+            vector = self._normalize_vector(vector)
+            
         self._vectors[vector_id] = vector
         if metadata is not None:
             self._metadata[vector_id] = metadata
+
+    def add_batch(
+        self, 
+        records: List[Dict[str, Any]], 
+        normalize: bool = False
+    ) -> None:
+        """
+        Batch adds multiple vector records to the store.
+        Each record dict should contain 'id', 'vector', and optionally 'metadata'.
+        """
+        for record in records:
+            if "id" not in record or "vector" not in record:
+                raise KeyError("Each record in batch must contain 'id' and 'vector' keys.")
+            self.add(
+                vector_id=record["id"],
+                vector=record["vector"],
+                metadata=record.get("metadata"),
+                normalize=normalize
+            )
 
     def get(self, vector_id: str) -> Optional[Dict[str, Any]]:
         """Retrieves a vector and its associated metadata by ID."""
@@ -49,24 +86,46 @@ class VectorStore:
                 "metadata": self._metadata.get(vec_id, {})
             })
 
-        # Higher similarity is better for cosine; lower distance is better for Euclidean/Manhattan
         reverse_sort = (metric == "cosine")
         results.sort(key=lambda item: item["score"], reverse=reverse_sort)
 
         return results[:k]
 
+    def save_to_json(self, filepath: str) -> None:
+        """Saves the current state of vectors and metadata to a JSON file."""
+        data = {
+            "vectors": self._vectors,
+            "metadata": self._metadata
+        }
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    def load_from_json(self, filepath: str) -> None:
+        """Loads state into the current instance from a JSON file."""
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self._vectors = data.get("vectors", {})
+        self._metadata = data.get("metadata", {})
+
+    @classmethod
+    def from_json(cls, filepath: str) -> "VectorStore":
+        """Factory method to construct a new VectorStore instance from a JSON file."""
+        store = cls()
+        store.load_from_json(filepath)
+        return store
+
 
 if __name__ == "__main__":
     store = VectorStore()
-    
-    # Store sample embedding vectors representing topics
-    store.add("doc_1", [0.9, 0.1, 0.0], {"title": "Introduction to AI"})
-    store.add("doc_2", [0.85, 0.15, 0.05], {"title": "Machine Learning Fundamentals"})
-    store.add("doc_3", [0.0, 0.1, 0.95], {"title": "Baking Sourdough Bread"})
 
-    query = [0.92, 0.08, 0.0]
-    top_results = store.search(query_vector=query, k=2, metric="cosine")
+    # Batch insertion test
+    batch_data = [
+        {"id": "doc_1", "vector": [3.0, 4.0, 0.0], "metadata": {"topic": "Math"}},
+        {"id": "doc_2", "vector": [0.0, 0.0, 5.0], "metadata": {"topic": "Physics"}},
+    ]
+    store.add_batch(batch_data, normalize=True)
 
-    print(f"Top results for query {query}:")
-    for res in top_results:
-        print(f" - [{res['id']}] Score: {res['score']:.4f} | Title: {res['metadata'].get('title')}")
+    # Magnitude of normalized [3.0, 4.0, 0.0] should now be 1.0 ([0.6, 0.8, 0.0])
+    doc1 = store.get("doc_1")
+    print("Normalized doc_1 vector:", doc1["vector"])
+    print("Magnitude:", VectorMetrics.magnitude(doc1["vector"]))
