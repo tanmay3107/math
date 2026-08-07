@@ -3,7 +3,7 @@ from typing import Dict, List, Any, Optional
 from metrics import VectorMetrics
 
 class VectorStore:
-    """Lightweight in-memory vector database with persistence, batch operations, and normalization."""
+    """Lightweight in-memory vector database with persistence, metadata filtering, and search."""
 
     def __init__(self):
         self._vectors: Dict[str, List[float]] = {}
@@ -16,6 +16,11 @@ class VectorStore:
         if mag == 0:
             raise ValueError("Cannot normalize a zero vector.")
         return [v / mag for v in vector]
+
+    def _matches_filter(self, vec_id: str, filter_metadata: Dict[str, Any]) -> bool:
+        """Helper to check if a vector's metadata matches all criteria in filter_metadata."""
+        item_meta = self._metadata.get(vec_id, {})
+        return all(item_meta.get(key) == value for key, value in filter_metadata.items())
 
     def add(
         self, 
@@ -37,10 +42,7 @@ class VectorStore:
         records: List[Dict[str, Any]], 
         normalize: bool = False
     ) -> None:
-        """
-        Batch adds multiple vector records to the store.
-        Each record dict should contain 'id', 'vector', and optionally 'metadata'.
-        """
+        """Batch adds multiple vector records to the store."""
         for record in records:
             if "id" not in record or "vector" not in record:
                 raise KeyError("Each record in batch must contain 'id' and 'vector' keys.")
@@ -61,9 +63,15 @@ class VectorStore:
             "metadata": self._metadata.get(vector_id, {})
         }
 
-    def search(self, query_vector: List[float], k: int = 3, metric: str = "cosine") -> List[Dict[str, Any]]:
+    def search(
+        self, 
+        query_vector: List[float], 
+        k: int = 3, 
+        metric: str = "cosine",
+        filter_metadata: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Searches for the top-k nearest vectors using the specified metric.
+        Searches for top-k nearest vectors using the specified metric and optional metadata filters.
         Supported metrics: 'cosine', 'euclidean', 'manhattan'.
         """
         if not self._vectors:
@@ -71,6 +79,10 @@ class VectorStore:
 
         results = []
         for vec_id, vec in self._vectors.items():
+            # Apply metadata filtering before calculating distance/similarity
+            if filter_metadata and not self._matches_filter(vec_id, filter_metadata):
+                continue
+
             if metric == "cosine":
                 score = VectorMetrics.cosine_similarity(query_vector, vec)
             elif metric == "euclidean":
@@ -118,14 +130,15 @@ class VectorStore:
 if __name__ == "__main__":
     store = VectorStore()
 
-    # Batch insertion test
-    batch_data = [
-        {"id": "doc_1", "vector": [3.0, 4.0, 0.0], "metadata": {"topic": "Math"}},
-        {"id": "doc_2", "vector": [0.0, 0.0, 5.0], "metadata": {"topic": "Physics"}},
-    ]
-    store.add_batch(batch_data, normalize=True)
+    store.add("doc_1", [1.0, 0.0, 0.0], {"category": "tech", "author": "alice"})
+    store.add("doc_2", [0.99, 0.01, 0.0], {"category": "cooking", "author": "bob"})
+    store.add("doc_3", [0.95, 0.05, 0.0], {"category": "tech", "author": "alice"})
 
-    # Magnitude of normalized [3.0, 4.0, 0.0] should now be 1.0 ([0.6, 0.8, 0.0])
-    doc1 = store.get("doc_1")
-    print("Normalized doc_1 vector:", doc1["vector"])
-    print("Magnitude:", VectorMetrics.magnitude(doc1["vector"]))
+    query = [1.0, 0.0, 0.0]
+
+    # Search filtered by category="tech"
+    filtered_results = store.search(query, k=2, filter_metadata={"category": "tech"})
+
+    print("Filtered Search Results (tech category only):")
+    for res in filtered_results:
+        print(f" - [{res['id']}] Score: {res['score']:.4f} | Meta: {res['metadata']}")
