@@ -6,7 +6,7 @@ from vector_store import VectorStore
 from metrics import VectorMetrics
 
 class TestVectorStore(unittest.TestCase):
-    """Unit tests for the VectorStore class, including persistence, normalization, and batch operations."""
+    """Unit tests for the VectorStore class, including persistence, normalization, batch operations, and filtering."""
 
     def setUp(self):
         self.store = VectorStore()
@@ -85,7 +85,6 @@ class TestVectorStore(unittest.TestCase):
         self.assertEqual(loaded_store.get("vec1"), self.store.get("vec1"))
 
     def test_vector_normalization(self):
-        # [3.0, 4.0, 0.0] normalized has unit magnitude 1.0 -> [0.6, 0.8, 0.0]
         self.store.add("norm_vec", [3.0, 4.0, 0.0], normalize=True)
         retrieved = self.store.get("norm_vec")
         
@@ -116,10 +115,38 @@ class TestVectorStore(unittest.TestCase):
 
     def test_add_batch_invalid_record_raises(self):
         invalid_batch = [
-            {"vector": [1.0, 2.0, 3.0]}  # Missing required 'id' key
+            {"vector": [1.0, 2.0, 3.0]}
         ]
         with self.assertRaises(KeyError):
             self.store.add_batch(invalid_batch)
+
+    def test_search_with_single_metadata_filter(self):
+        self.store.add("doc1", [1.0, 0.0, 0.0], {"category": "tech", "author": "alice"})
+        self.store.add("doc2", [0.99, 0.01, 0.0], {"category": "cooking", "author": "bob"})
+        self.store.add("doc3", [0.95, 0.05, 0.0], {"category": "tech", "author": "charlie"})
+
+        results = self.store.search([1.0, 0.0, 0.0], k=3, filter_metadata={"category": "tech"})
+        
+        self.assertEqual(len(results), 2)
+        result_ids = [r["id"] for r in results]
+        self.assertIn("doc1", result_ids)
+        self.assertIn("doc3", result_ids)
+        self.assertNotIn("doc2", result_ids)
+
+    def test_search_with_multiple_metadata_filters(self):
+        self.store.add("doc1", [1.0, 0.0, 0.0], {"category": "tech", "author": "alice"})
+        self.store.add("doc2", [0.99, 0.01, 0.0], {"category": "tech", "author": "bob"})
+
+        results = self.store.search([1.0, 0.0, 0.0], k=3, filter_metadata={"category": "tech", "author": "alice"})
+        
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["id"], "doc1")
+
+    def test_search_filter_no_matches(self):
+        self.store.add("doc1", [1.0, 0.0, 0.0], {"category": "tech"})
+
+        results = self.store.search([1.0, 0.0, 0.0], k=3, filter_metadata={"category": "sports"})
+        self.assertEqual(results, [])
 
 if __name__ == "__main__":
     unittest.main()
