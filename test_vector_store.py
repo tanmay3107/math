@@ -6,7 +6,7 @@ from vector_store import VectorStore
 from metrics import VectorMetrics
 
 class TestVectorStore(unittest.TestCase):
-    """Unit tests for the VectorStore class, including persistence, normalization, batch operations, and filtering."""
+    """Unit tests for the VectorStore class, including CRUD, persistence, normalization, batch operations, and filtering."""
 
     def setUp(self):
         self.store = VectorStore()
@@ -147,6 +147,47 @@ class TestVectorStore(unittest.TestCase):
 
         results = self.store.search([1.0, 0.0, 0.0], k=3, filter_metadata={"category": "sports"})
         self.assertEqual(results, [])
+
+    def test_delete_existing_vector(self):
+        self.store.add("item_1", self.vec1, {"category": "A"})
+        success = self.store.delete("item_1")
+        
+        self.assertTrue(success)
+        self.assertIsNone(self.store.get("item_1"))
+
+    def test_delete_nonexistent_vector(self):
+        success = self.store.delete("missing_item")
+        self.assertFalse(success)
+
+    def test_update_vector_and_metadata(self):
+        self.store.add("item_1", self.vec1, {"category": "A"})
+        
+        # Update both vector and metadata with normalization
+        success = self.store.update("item_1", vector=[3.0, 4.0, 0.0], metadata={"category": "B"}, normalize=True)
+        updated = self.store.get("item_1")
+        
+        self.assertTrue(success)
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated["metadata"], {"category": "B"})
+        self.assertAlmostEqual(VectorMetrics.magnitude(updated["vector"]), 1.0)
+        self.assertAlmostEqual(updated["vector"][0], 0.6)
+
+    def test_update_partial(self):
+        self.store.add("item_1", self.vec1, {"category": "A"})
+        
+        # Update metadata only
+        self.store.update("item_1", metadata={"category": "Updated"})
+        self.assertEqual(self.store.get("item_1")["vector"], self.vec1)
+        self.assertEqual(self.store.get("item_1")["metadata"], {"category": "Updated"})
+
+        # Update vector only
+        self.store.update("item_1", vector=self.vec2)
+        self.assertEqual(self.store.get("item_1")["vector"], self.vec2)
+        self.assertEqual(self.store.get("item_1")["metadata"], {"category": "Updated"})
+
+    def test_update_nonexistent_vector(self):
+        success = self.store.update("missing_item", vector=self.vec1)
+        self.assertFalse(success)
 
 if __name__ == "__main__":
     unittest.main()
