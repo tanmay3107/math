@@ -3,7 +3,7 @@ from typing import Dict, List, Any, Optional
 from metrics import VectorMetrics
 
 class VectorStore:
-    """Lightweight in-memory vector database with persistence, metadata filtering, and search."""
+    """Lightweight in-memory vector database with persistence, filtering, and CRUD operations."""
 
     def __init__(self):
         self._vectors: Dict[str, List[float]] = {}
@@ -29,7 +29,7 @@ class VectorStore:
         metadata: Optional[Dict[str, Any]] = None,
         normalize: bool = False
     ) -> None:
-        """Adds or updates a vector with optional metadata and optional L2 normalization."""
+        """Adds or overwrites a vector with optional metadata and L2 normalization."""
         if normalize:
             vector = self._normalize_vector(vector)
             
@@ -52,6 +52,39 @@ class VectorStore:
                 metadata=record.get("metadata"),
                 normalize=normalize
             )
+
+    def delete(self, vector_id: str) -> bool:
+        """Deletes a vector and its metadata by ID. Returns True if deleted, False if not found."""
+        if vector_id not in self._vectors:
+            return False
+        
+        del self._vectors[vector_id]
+        self._metadata.pop(vector_id, None)
+        return True
+
+    def update(
+        self, 
+        vector_id: str, 
+        vector: Optional[List[float]] = None, 
+        metadata: Optional[Dict[str, Any]] = None,
+        normalize: bool = False
+    ) -> bool:
+        """
+        Updates an existing entry's vector, metadata, or both.
+        Returns True if updated successfully, or False if the vector_id was not found.
+        """
+        if vector_id not in self._vectors:
+            return False
+
+        if vector is not None:
+            if normalize:
+                vector = self._normalize_vector(vector)
+            self._vectors[vector_id] = vector
+
+        if metadata is not None:
+            self._metadata[vector_id] = metadata
+
+        return True
 
     def get(self, vector_id: str) -> Optional[Dict[str, Any]]:
         """Retrieves a vector and its associated metadata by ID."""
@@ -79,7 +112,6 @@ class VectorStore:
 
         results = []
         for vec_id, vec in self._vectors.items():
-            # Apply metadata filtering before calculating distance/similarity
             if filter_metadata and not self._matches_filter(vec_id, filter_metadata):
                 continue
 
@@ -130,15 +162,14 @@ class VectorStore:
 if __name__ == "__main__":
     store = VectorStore()
 
-    store.add("doc_1", [1.0, 0.0, 0.0], {"category": "tech", "author": "alice"})
-    store.add("doc_2", [0.99, 0.01, 0.0], {"category": "cooking", "author": "bob"})
-    store.add("doc_3", [0.95, 0.05, 0.0], {"category": "tech", "author": "alice"})
+    store.add("doc_1", [1.0, 0.0, 0.0], {"title": "Draft Paper"})
+    print("Initial doc_1:", store.get("doc_1"))
 
-    query = [1.0, 0.0, 0.0]
+    # Update metadata and vector
+    store.update("doc_1", vector=[3.0, 4.0, 0.0], metadata={"title": "Final Paper"}, normalize=True)
+    print("Updated doc_1:", store.get("doc_1"))
 
-    # Search filtered by category="tech"
-    filtered_results = store.search(query, k=2, filter_metadata={"category": "tech"})
-
-    print("Filtered Search Results (tech category only):")
-    for res in filtered_results:
-        print(f" - [{res['id']}] Score: {res['score']:.4f} | Meta: {res['metadata']}")
+    # Delete document
+    deleted = store.delete("doc_1")
+    print(f"Deleted doc_1 status: {deleted}")
+    print("Get after delete:", store.get("doc_1"))
