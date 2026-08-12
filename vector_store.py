@@ -1,175 +1,124 @@
 import json
-from typing import Dict, List, Any, Optional
-from metrics import VectorMetrics
+import sys
+from vector_store import VectorStore
 
-class VectorStore:
-    """Lightweight in-memory vector database with persistence, filtering, and CRUD operations."""
+def print_help():
+    print("\n=================== VectorStore CLI Commands ===================")
+    print("  add <id> <v1,v2,v3> [meta_json]  - Add/update vector (e.g. add doc1 1.0,0.5,0.0 {\"category\":\"tech\"})")
+    print("  get <id>                         - Retrieve a vector and its metadata")
+    print("  search <v1,v2,v3> <k> [metric]   - Search top-k vectors (metric: cosine|euclidean|manhattan)")
+    print("  delete <id>                      - Delete a vector by ID")
+    print("  save <filepath>                  - Save vector store state to a JSON file")
+    print("  load <filepath>                  - Load vector store state from a JSON file")
+    print("  help                             - Display command menu")
+    print("  exit                             - Exit CLI")
+    print("================================================================\n")
 
-    def __init__(self):
-        self._vectors: Dict[str, List[float]] = {}
-        self._metadata: Dict[str, Dict[str, Any]] = {}
+def main():
+    store = VectorStore()
+    print("VectorStore CLI Initialized. Type 'help' to see available commands.\n")
 
-    @staticmethod
-    def _normalize_vector(vector: List[float]) -> List[float]:
-        """Helper to convert a vector into a unit vector (L2 normalization)."""
-        mag = VectorMetrics.magnitude(vector)
-        if mag == 0:
-            raise ValueError("Cannot normalize a zero vector.")
-        return [v / mag for v in vector]
-
-    def _matches_filter(self, vec_id: str, filter_metadata: Dict[str, Any]) -> bool:
-        """Helper to check if a vector's metadata matches all criteria in filter_metadata."""
-        item_meta = self._metadata.get(vec_id, {})
-        return all(item_meta.get(key) == value for key, value in filter_metadata.items())
-
-    def add(
-        self, 
-        vector_id: str, 
-        vector: List[float], 
-        metadata: Optional[Dict[str, Any]] = None,
-        normalize: bool = False
-    ) -> None:
-        """Adds or overwrites a vector with optional metadata and L2 normalization."""
-        if normalize:
-            vector = self._normalize_vector(vector)
-            
-        self._vectors[vector_id] = vector
-        if metadata is not None:
-            self._metadata[vector_id] = metadata
-
-    def add_batch(
-        self, 
-        records: List[Dict[str, Any]], 
-        normalize: bool = False
-    ) -> None:
-        """Batch adds multiple vector records to the store."""
-        for record in records:
-            if "id" not in record or "vector" not in record:
-                raise KeyError("Each record in batch must contain 'id' and 'vector' keys.")
-            self.add(
-                vector_id=record["id"],
-                vector=record["vector"],
-                metadata=record.get("metadata"),
-                normalize=normalize
-            )
-
-    def delete(self, vector_id: str) -> bool:
-        """Deletes a vector and its metadata by ID. Returns True if deleted, False if not found."""
-        if vector_id not in self._vectors:
-            return False
-        
-        del self._vectors[vector_id]
-        self._metadata.pop(vector_id, None)
-        return True
-
-    def update(
-        self, 
-        vector_id: str, 
-        vector: Optional[List[float]] = None, 
-        metadata: Optional[Dict[str, Any]] = None,
-        normalize: bool = False
-    ) -> bool:
-        """
-        Updates an existing entry's vector, metadata, or both.
-        Returns True if updated successfully, or False if the vector_id was not found.
-        """
-        if vector_id not in self._vectors:
-            return False
-
-        if vector is not None:
-            if normalize:
-                vector = self._normalize_vector(vector)
-            self._vectors[vector_id] = vector
-
-        if metadata is not None:
-            self._metadata[vector_id] = metadata
-
-        return True
-
-    def get(self, vector_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieves a vector and its associated metadata by ID."""
-        if vector_id not in self._vectors:
-            return None
-        return {
-            "id": vector_id,
-            "vector": self._vectors[vector_id],
-            "metadata": self._metadata.get(vector_id, {})
-        }
-
-    def search(
-        self, 
-        query_vector: List[float], 
-        k: int = 3, 
-        metric: str = "cosine",
-        filter_metadata: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Searches for top-k nearest vectors using the specified metric and optional metadata filters.
-        Supported metrics: 'cosine', 'euclidean', 'manhattan'.
-        """
-        if not self._vectors:
-            return []
-
-        results = []
-        for vec_id, vec in self._vectors.items():
-            if filter_metadata and not self._matches_filter(vec_id, filter_metadata):
+    while True:
+        try:
+            user_input = input("vectorstore> ").strip()
+            if not user_input:
                 continue
 
-            if metric == "cosine":
-                score = VectorMetrics.cosine_similarity(query_vector, vec)
-            elif metric == "euclidean":
-                score = VectorMetrics.euclidean_distance(query_vector, vec)
-            elif metric == "manhattan":
-                score = VectorMetrics.manhattan_distance(query_vector, vec)
+            parts = user_input.split(maxsplit=3)
+            cmd = parts[0].lower()
+
+            if cmd in ("exit", "quit"):
+                print("Exiting VectorStore CLI. Goodbye!")
+                break
+
+            elif cmd == "help":
+                print_help()
+
+            elif cmd == "add":
+                if len(parts) < 3:
+                    print("Usage: add <id> <v1,v2,v3> [meta_json]")
+                    continue
+                vec_id = parts[1]
+                try:
+                    vector = [float(x) for x in parts[2].split(",")]
+                except ValueError:
+                    print("Error: Vector elements must be comma-separated floats (e.g. 1.0,0.5,0.0).")
+                    continue
+
+                metadata = None
+                if len(parts) > 3:
+                    try:
+                        metadata = json.loads(parts[3])
+                    except json.JSONDecodeError:
+                        print("Error: Metadata must be valid JSON format (e.g. {\"key\":\"value\"}).")
+                        continue
+
+                store.add(vec_id, vector, metadata=metadata)
+                print(f"Added vector '{vec_id}'.")
+
+            elif cmd == "get":
+                if len(parts) < 2:
+                    print("Usage: get <id>")
+                    continue
+                res = store.get(parts[1])
+                if res:
+                    print(json.dumps(res, indent=2))
+                else:
+                    print(f"Vector ID '{parts[1]}' not found.")
+
+            elif cmd == "search":
+                if len(parts) < 3:
+                    print("Usage: search <v1,v2,v3> <k> [metric]")
+                    continue
+                try:
+                    query_vec = [float(x) for x in parts[1].split(",")]
+                    k = int(parts[2])
+                except ValueError:
+                    print("Error: Query vector must be comma-separated floats and k must be an integer.")
+                    continue
+
+                metric = parts[3] if len(parts) > 3 else "cosine"
+                try:
+                    results = store.search(query_vec, k=k, metric=metric)
+                    print(f"\nTop {len(results)} results using '{metric}':")
+                    for idx, r in enumerate(results, start=1):
+                        print(f"  {idx}. [{r['id']}] Score: {r['score']:.4f} | Metadata: {r['metadata']}")
+                    print()
+                except ValueError as err:
+                    print(f"Search Error: {err}")
+
+            elif cmd == "delete":
+                if len(parts) < 2:
+                    print("Usage: delete <id>")
+                    continue
+                if store.delete(parts[1]):
+                    print(f"Deleted vector '{parts[1]}'.")
+                else:
+                    print(f"Vector ID '{parts[1]}' not found.")
+
+            elif cmd == "save":
+                if len(parts) < 2:
+                    print("Usage: save <filepath>")
+                    continue
+                store.save_to_json(parts[1])
+                print(f"Saved store to '{parts[1]}'.")
+
+            elif cmd == "load":
+                if len(parts) < 2:
+                    print("Usage: load <filepath>")
+                    continue
+                try:
+                    store.load_from_json(parts[1])
+                    print(f"Loaded store from '{parts[1]}'.")
+                except Exception as err:
+                    print(f"Load Error: {err}")
+
             else:
-                raise ValueError(f"Unsupported metric: {metric}. Choose 'cosine', 'euclidean', or 'manhattan'.")
+                print(f"Unknown command: '{cmd}'. Type 'help' for menu.")
 
-            results.append({
-                "id": vec_id,
-                "score": score,
-                "metadata": self._metadata.get(vec_id, {})
-            })
-
-        reverse_sort = (metric == "cosine")
-        results.sort(key=lambda item: item["score"], reverse=reverse_sort)
-
-        return results[:k]
-
-    def save_to_json(self, filepath: str) -> None:
-        """Saves the current state of vectors and metadata to a JSON file."""
-        data = {
-            "vectors": self._vectors,
-            "metadata": self._metadata
-        }
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-
-    def load_from_json(self, filepath: str) -> None:
-        """Loads state into the current instance from a JSON file."""
-        with open(filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        self._vectors = data.get("vectors", {})
-        self._metadata = data.get("metadata", {})
-
-    @classmethod
-    def from_json(cls, filepath: str) -> "VectorStore":
-        """Factory method to construct a new VectorStore instance from a JSON file."""
-        store = cls()
-        store.load_from_json(filepath)
-        return store
-
+        except (KeyboardInterrupt, EOFError):
+            print("\nExiting CLI.")
+            break
 
 if __name__ == "__main__":
-    store = VectorStore()
-
-    store.add("doc_1", [1.0, 0.0, 0.0], {"title": "Draft Paper"})
-    print("Initial doc_1:", store.get("doc_1"))
-
-    # Update metadata and vector
-    store.update("doc_1", vector=[3.0, 4.0, 0.0], metadata={"title": "Final Paper"}, normalize=True)
-    print("Updated doc_1:", store.get("doc_1"))
-
-    # Delete document
-    deleted = store.delete("doc_1")
-    print(f"Deleted doc_1 status: {deleted}")
-    print("Get after delete:", store.get("doc_1"))
+    main()
