@@ -1,175 +1,224 @@
+import math
 import json
-from typing import Dict, List, Any, Optional
+import re
+from collections import defaultdict
 from metrics import VectorMetrics
 
 class VectorStore:
-    """Lightweight in-memory vector database with persistence, filtering, and CRUD operations."""
+    """Vector database with metadata filtering, persistence, CRUD, and hybrid (keyword + vector) search."""
 
     def __init__(self):
-        self._vectors: Dict[str, List[float]] = {}
-        self._metadata: Dict[str, Dict[str, Any]] = {}
+        self.vectors = {}         # id -> vector list
+        self.metadata = {}        # id -> metadata dict
+        self.inverted_index = defaultdict(set)  # term -> set of doc_ids
+        self.doc_term_freqs = defaultdict(lambda: defaultdict(int)) # doc_id -> {term: count}
+        self.doc_lengths = {}     # doc_id -> total token count
 
-    @staticmethod
-    def _normalize_vector(vector: List[float]) -> List[float]:
-        """Helper to convert a vector into a unit vector (L2 normalization)."""
-        mag = VectorMetrics.magnitude(vector)
-        if mag == 0:
-            raise ValueError("Cannot normalize a zero vector.")
-        return [v / mag for v in vector]
+    def _tokenize(self, text: str) -> list[str]:
+        """Convert string to lowercased alphanumeric tokens."""
+        if not isinstance(text, str):
+            return []
+        return re.findall(r'\w+', text.lower())
 
-    def _matches_filter(self, vec_id: str, filter_metadata: Dict[str, Any]) -> bool:
-        """Helper to check if a vector's metadata matches all criteria in filter_metadata."""
-        item_meta = self._metadata.get(vec_id, {})
-        return all(item_meta.get(key) == value for key, value in filter_metadata.items())
+    def _index_doc(self, doc_id: str, metadata: dict):
+        """Index all string values in metadata for keyword search."""
+        self._unindex_doc(doc_id)
+        if not metadata:
+            return
 
-    def add(
-        self, 
-        vector_id: str, 
-        vector: List[float], 
-        metadata: Optional[Dict[str, Any]] = None,
-        normalize: bool = False
-    ) -> None:
-        """Adds or overwrites a vector with optional metadata and L2 normalization."""
-        if normalize:
-            vector = self._normalize_vector(vector)
-            
-        self._vectors[vector_id] = vector
-        if metadata is not None:
-            self._metadata[vector_id] = metadata
-
-    def add_batch(
-        self, 
-        records: List[Dict[str, Any]], 
-        normalize: bool = False
-    ) -> None:
-        """Batch adds multiple vector records to the store."""
-        for record in records:
-            if "id" not in record or "vector" not in record:
-                raise KeyError("Each record in batch must contain 'id' and 'vector' keys.")
-            self.add(
-                vector_id=record["id"],
-                vector=record["vector"],
-                metadata=record.get("metadata"),
-                normalize=normalize
-            )
-
-    def delete(self, vector_id: str) -> bool:
-        """Deletes a vector and its metadata by ID. Returns True if deleted, False if not found."""
-        if vector_id not in self._vectors:
-            return False
+        all_text = " ".join([str(v) for v in metadata.values() if isinstance(v, (str, list, dict))])
+        tokens = self._tokenize(all_text)
         
-        del self._vectors[vector_id]
-        self._metadata.pop(vector_id, None)
-        return True
+        if not tokens:
+            return
 
-    def update(
-        self, 
-        vector_id: str, 
-        vector: Optional[List[float]] = None, 
-        metadata: Optional[Dict[str, Any]] = None,
-        normalize: bool = False
-    ) -> bool:
-        """
-        Updates an existing entry's vector, metadata, or both.
-        Returns True if updated successfully, or False if the vector_id was not found.
-        """
-        if vector_id not in self._vectors:
-            return False
+        self.doc_lengths[doc_id] = len(tokens)
+        for token in tokens:
+            self.inverted_index[token].add(doc_id)
+            self.doc_term_freqs[doc_id][token] += 1
 
-        if vector is not None:
-            if normalize:
-                vector = self._normalize_vector(vector)
-            self._vectors[vector_id] = vector
+    def _unindex_doc(self, doc_id: str):
+        """Remove document terms from the inverted index."""
+        if doc_id in self.doc_term_freqs:
+            for token in list(self.doc_term_freqs[doc_id].keys()):
+                self.inverted_index[token].discard(doc_id)
+                if not self.inverted_index[token]:
+                    del self.inverted_index[token]
+            del self.doc_term_freqs[doc_id]
+        if doc_id in self.doc_lengths:
+            del self.doc_lengths[doc_id]
 
-        if metadata is not None:
-            self._metadata[vector_id] = metadata
+    def add(self, doc_id: str, vector: list[float], metadata: dict = None, normalize: bool = False):
+        """Add or overwrite a vector entry and index its metadata."""
+        if normalize:
+            vector = VectorMetrics.normalize(vector)
+        self.vectors[doc_id] = vector
+        self.metadata[doc_id] = metadata or {}
+        self._index_doc(doc_id, self.metadata[doc_id])
 
-        return True
+    def add_batch(self, records: list[dict], normalize: bool = False):
+        """Add a batch of records: [{'id': str, 'vector': list, 'metadata': dict}]."""
+        for rec in records:
+            if "id" not in rec or "vector" not in rec:
+                raise KeyError("Each record must contain 'id' and 'vector' keys.")
+            self.add(rec["id"], rec["vector"], rec.get("metadata"), normalize=normalize)
 
-    def get(self, vector_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieves a vector and its associated metadata by ID."""
-        if vector_id not in self._vectors:
+    def get(self, doc_id: str) -> dict | None:
+        """Retrieve a record by ID."""
+        if doc_id not in self.vectors:
             return None
         return {
-            "id": vector_id,
-            "vector": self._vectors[vector_id],
-            "metadata": self._metadata.get(vector_id, {})
+            "id": doc_id,
+            "vector": self.vectors[doc_id],
+            "metadata": self.metadata[doc_id]
         }
 
-    def search(
-        self, 
-        query_vector: List[float], 
-        k: int = 3, 
-        metric: str = "cosine",
-        filter_metadata: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Searches for top-k nearest vectors using the specified metric and optional metadata filters.
-        Supported metrics: 'cosine', 'euclidean', 'manhattan'.
-        """
-        if not self._vectors:
-            return []
+    def delete(self, doc_id: str) -> bool:
+        """Delete a vector and its indexed terms."""
+        if doc_id in self.vectors:
+            del self.vectors[doc_id]
+            del self.metadata[doc_id]
+            self._unindex_doc(doc_id)
+            return True
+        return False
 
+    def update(self, doc_id: str, vector: list[float] = None, metadata: dict = None, normalize: bool = False) -> bool:
+        """Partially or fully update a vector and its metadata."""
+        if doc_id not in self.vectors:
+            return False
+        if vector is not None:
+            if normalize:
+                vector = VectorMetrics.normalize(vector)
+            self.vectors[doc_id] = vector
+        if metadata is not None:
+            self.metadata[doc_id] = metadata
+            self._index_doc(doc_id, metadata)
+        return True
+
+    def search(self, query_vector: list[float], k: int = 5, metric: str = "cosine", filter_metadata: dict = None) -> list[dict]:
+        """Perform dense vector similarity search."""
         results = []
-        for vec_id, vec in self._vectors.items():
-            if filter_metadata and not self._matches_filter(vec_id, filter_metadata):
-                continue
+        metric_fn = getattr(VectorMetrics, f"{metric}_similarity", None)
+        if metric_fn is None:
+            raise ValueError(f"Unsupported metric '{metric}'. Use 'cosine', 'euclidean', or 'manhattan'.")
 
-            if metric == "cosine":
-                score = VectorMetrics.cosine_similarity(query_vector, vec)
-            elif metric == "euclidean":
-                score = VectorMetrics.euclidean_distance(query_vector, vec)
-            elif metric == "manhattan":
-                score = VectorMetrics.manhattan_distance(query_vector, vec)
-            else:
-                raise ValueError(f"Unsupported metric: {metric}. Choose 'cosine', 'euclidean', or 'manhattan'.")
+        for doc_id, vector in self.vectors.items():
+            if filter_metadata:
+                doc_meta = self.metadata.get(doc_id, {})
+                if not all(doc_meta.get(fk) == fv for fk, fv in filter_metadata.items()):
+                    continue
 
+            score = metric_fn(query_vector, vector)
             results.append({
-                "id": vec_id,
+                "id": doc_id,
                 "score": score,
-                "metadata": self._metadata.get(vec_id, {})
+                "vector": vector,
+                "metadata": self.metadata[doc_id]
             })
 
-        reverse_sort = (metric == "cosine")
-        results.sort(key=lambda item: item["score"], reverse=reverse_sort)
-
+        reverse_sort = True if metric == "cosine" else False
+        results.sort(key=lambda x: x["score"], reverse=reverse_sort)
         return results[:k]
 
-    def save_to_json(self, filepath: str) -> None:
-        """Saves the current state of vectors and metadata to a JSON file."""
+    def keyword_search(self, query_text: str, k: int = 5) -> list[dict]:
+        """Perform BM25-style term frequency keyword search over indexed metadata."""
+        tokens = self._tokenize(query_text)
+        if not tokens or not self.vectors:
+            return []
+
+        num_docs = len(self.vectors)
+        avg_dl = sum(self.doc_lengths.values()) / num_docs if num_docs > 0 else 1.0
+        scores = defaultdict(float)
+
+        # BM25 parameters
+        k1 = 1.5
+        b = 0.75
+
+        for token in tokens:
+            matching_docs = self.inverted_index.get(token, set())
+            doc_freq = len(matching_docs)
+            if doc_freq == 0:
+                continue
+
+            # Inverse Document Frequency (IDF)
+            idf = math.log((num_docs - doc_freq + 0.5) / (doc_freq + 0.5) + 1.0)
+
+            for doc_id in matching_docs:
+                tf = self.doc_term_freqs[doc_id][token]
+                doc_len = self.doc_lengths[doc_id]
+                
+                # BM25 term weight
+                denom = tf + k1 * (1.0 - b + b * (doc_len / avg_dl))
+                term_score = idf * (tf * (k1 + 1.0)) / denom
+                scores[doc_id] += term_score
+
+        results = [
+            {
+                "id": doc_id,
+                "score": score,
+                "vector": self.vectors[doc_id],
+                "metadata": self.metadata[doc_id]
+            }
+            for doc_id, score in scores.items()
+        ]
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:k]
+
+    def hybrid_search(self, query_vector: list[float], query_text: str, k: int = 5, rrf_k: int = 60, metric: str = "cosine") -> list[dict]:
+        """Hybrid search combining vector and keyword results via Reciprocal Rank Fusion (RRF)."""
+        vector_res = self.search(query_vector, k=k*2, metric=metric)
+        keyword_res = self.keyword_search(query_text, k=k*2)
+
+        rrf_scores = defaultdict(float)
+
+        for rank, res in enumerate(vector_res, start=1):
+            rrf_scores[res["id"]] += 1.0 / (rrf_k + rank)
+
+        for rank, res in enumerate(keyword_res, start=1):
+            rrf_scores[res["id"]] += 1.0 / (rrf_k + rank)
+
+        combined_results = []
+        for doc_id, score in rrf_scores.items():
+            combined_results.append({
+                "id": doc_id,
+                "rrf_score": score,
+                "vector": self.vectors[doc_id],
+                "metadata": self.metadata[doc_id]
+            })
+
+        combined_results.sort(key=lambda x: x["rrf_score"], reverse=True)
+        return combined_results[:k]
+
+    def save_to_json(self, filepath: str):
+        """Serialize state to JSON file."""
         data = {
-            "vectors": self._vectors,
-            "metadata": self._metadata
+            doc_id: {
+                "vector": self.vectors[doc_id],
+                "metadata": self.metadata[doc_id]
+            }
+            for doc_id in self.vectors
         }
-        with open(filepath, "w", encoding="utf-8") as f:
+        with open(filepath, "w") as f:
             json.dump(data, f, indent=2)
 
-    def load_from_json(self, filepath: str) -> None:
-        """Loads state into the current instance from a JSON file."""
-        with open(filepath, "r", encoding="utf-8") as f:
+    def load_from_json(self, filepath: str):
+        """Load state from JSON file and rebuild inverted index."""
+        with open(filepath, "r") as f:
             data = json.load(f)
-        self._vectors = data.get("vectors", {})
-        self._metadata = data.get("metadata", {})
+        
+        self.vectors.clear()
+        self.metadata.clear()
+        self.inverted_index.clear()
+        self.doc_term_freqs.clear()
+        self.doc_lengths.clear()
+
+        for doc_id, payload in data.items():
+            self.add(doc_id, payload["vector"], payload.get("metadata"))
 
     @classmethod
-    def from_json(cls, filepath: str) -> "VectorStore":
-        """Factory method to construct a new VectorStore instance from a JSON file."""
+    def from_json(cls, filepath: str):
+        """Factory method to construct instance directly from JSON file."""
         store = cls()
         store.load_from_json(filepath)
         return store
-
-
-if __name__ == "__main__":
-    store = VectorStore()
-
-    store.add("doc_1", [1.0, 0.0, 0.0], {"title": "Draft Paper"})
-    print("Initial doc_1:", store.get("doc_1"))
-
-    # Update metadata and vector
-    store.update("doc_1", vector=[3.0, 4.0, 0.0], metadata={"title": "Final Paper"}, normalize=True)
-    print("Updated doc_1:", store.get("doc_1"))
-
-    # Delete document
-    deleted = store.delete("doc_1")
-    print(f"Deleted doc_1 status: {deleted}")
-    print("Get after delete:", store.get("doc_1"))
