@@ -3,25 +3,30 @@ import json
 import re
 from collections import defaultdict
 from metrics import VectorMetrics
+from hnsw import HNSWIndex
 
 class VectorStore:
-    """Vector database with metadata filtering, persistence, CRUD, and hybrid (keyword + vector) search."""
+    """Vector database with metadata filtering, persistence, CRUD, hybrid search,
+    and configurable HNSW ANN search backend.
+    """
 
-    def __init__(self):
+    def __init__(self, use_hnsw: bool = False, hnsw_kwargs: dict = None):
         self.vectors = {}         # id -> vector list
         self.metadata = {}        # id -> metadata dict
         self.inverted_index = defaultdict(set)  # term -> set of doc_ids
         self.doc_term_freqs = defaultdict(lambda: defaultdict(int)) # doc_id -> {term: count}
         self.doc_lengths = {}     # doc_id -> total token count
 
+        self.use_hnsw = use_hnsw
+        self.hnsw_kwargs = hnsw_kwargs or {"distance_metric": "cosine", "M": 16, "ef_construction": 64, "ef_search": 32}
+        self.hnsw_index = HNSWIndex(**self.hnsw_kwargs) if use_hnsw else None
+
     def _tokenize(self, text: str) -> list[str]:
-        """Convert string to lowercased alphanumeric tokens."""
         if not isinstance(text, str):
             return []
         return re.findall(r'\w+', text.lower())
 
     def _index_doc(self, doc_id: str, metadata: dict):
-        """Index all string values in metadata for keyword search."""
         self._unindex_doc(doc_id)
         if not metadata:
             return
@@ -38,7 +43,6 @@ class VectorStore:
             self.doc_term_freqs[doc_id][token] += 1
 
     def _unindex_doc(self, doc_id: str):
-        """Remove document terms from the inverted index."""
         if doc_id in self.doc_term_freqs:
             for token in list(self.doc_term_freqs[doc_id].keys()):
                 self.inverted_index[token].discard(doc_id)
@@ -48,23 +52,31 @@ class VectorStore:
         if doc_id in self.doc_lengths:
             del self.doc_lengths[doc_id]
 
+    def _rebuild_hnsw(self):
+        """Rebuild HNSW index from scratch after deletions or bulk reloads."""
+        if not self.use_hnsw:
+            return
+        self.hnsw_index = HNSWIndex(**self.hnsw_kwargs)
+        for doc_id, vec in self.vectors.items():
+            self.hnsw_index.add(doc_id, vec)
+
     def add(self, doc_id: str, vector: list[float], metadata: dict = None, normalize: bool = False):
-        """Add or overwrite a vector entry and index its metadata."""
         if normalize:
             vector = VectorMetrics.normalize(vector)
         self.vectors[doc_id] = vector
         self.metadata[doc_id] = metadata or {}
         self._index_doc(doc_id, self.metadata[doc_id])
 
+        if self.use_hnsw:
+            self.hnsw_index.add(doc_id, vector)
+
     def add_batch(self, records: list[dict], normalize: bool = False):
-        """Add a batch of records: [{'id': str, 'vector': list, 'metadata': dict}]."""
         for rec in records:
             if "id" not in rec or "vector" not in rec:
                 raise KeyError("Each record must contain 'id' and 'vector' keys.")
             self.add(rec["id"], rec["vector"], rec.get("metadata"), normalize=normalize)
 
     def get(self, doc_id: str) -> dict | None:
-        """Retrieve a record by ID."""
         if doc_id not in self.vectors:
             return None
         return {
@@ -74,16 +86,16 @@ class VectorStore:
         }
 
     def delete(self, doc_id: str) -> bool:
-        """Delete a vector and its indexed terms."""
         if doc_id in self.vectors:
             del self.vectors[doc_id]
             del self.metadata[doc_id]
             self._unindex_doc(doc_id)
+            if self.use_hnsw:
+                self._rebuild_hnsw()
             return True
         return False
 
     def update(self, doc_id: str, vector: list[float] = None, metadata: dict = None, normalize: bool = False) -> bool:
-        """Partially or fully update a vector and its metadata."""
         if doc_id not in self.vectors:
             return False
         if vector is not None:
@@ -93,10 +105,41 @@ class VectorStore:
         if metadata is not None:
             self.metadata[doc_id] = metadata
             self._index_doc(doc_id, metadata)
+        
+        if self.use_hnsw and vector is not None:
+            self._rebuild_hnsw()
         return True
 
-    def search(self, query_vector: list[float], k: int = 5, metric: str = "cosine", filter_metadata: dict = None) -> list[dict]:
-        """Perform dense vector similarity search."""
+    def search(self, query_vector: list[float], k: int = 5, metric: str = "cosine", 
+               filter_metadata: dict = None, backend: str = "exact") -> list[dict]:
+        """Perform vector search using either 'exact' brute-force or 'hnsw' graph backend."""
+        if backend == "hnsw":
+            if not self.use_hnsw:
+                raise ValueError("HNSW backend is not enabled on this VectorStore instance.")
+            
+            # Fetch extra candidates from HNSW to allow for metadata post-filtering
+            fetch_k = k * 5 if filter_metadata else k
+            raw_results = self.hnsw_index.search(query_vector, k=fetch_k)
+            
+            results = []
+            for item in raw_results:
+                doc_id = item["id"]
+                if filter_metadata:
+                    doc_meta = self.metadata.get(doc_id, {})
+                    if not all(doc_meta.get(fk) == fv for fk, fv in filter_metadata.items()):
+                        continue
+
+                results.append({
+                    "id": doc_id,
+                    "score": item["score"],
+                    "vector": self.vectors[doc_id],
+                    "metadata": self.metadata.get(doc_id, {})
+                })
+                if len(results) == k:
+                    break
+            return results
+
+        # Default: Exact brute-force search
         results = []
         metric_fn = getattr(VectorMetrics, f"{metric}_similarity", None)
         if metric_fn is None:
@@ -121,7 +164,6 @@ class VectorStore:
         return results[:k]
 
     def keyword_search(self, query_text: str, k: int = 5) -> list[dict]:
-        """Perform BM25-style term frequency keyword search over indexed metadata."""
         tokens = self._tokenize(query_text)
         if not tokens or not self.vectors:
             return []
@@ -130,9 +172,7 @@ class VectorStore:
         avg_dl = sum(self.doc_lengths.values()) / num_docs if num_docs > 0 else 1.0
         scores = defaultdict(float)
 
-        # BM25 parameters
-        k1 = 1.5
-        b = 0.75
+        k1, b = 1.5, 0.75
 
         for token in tokens:
             matching_docs = self.inverted_index.get(token, set())
@@ -140,14 +180,11 @@ class VectorStore:
             if doc_freq == 0:
                 continue
 
-            # Inverse Document Frequency (IDF)
             idf = math.log((num_docs - doc_freq + 0.5) / (doc_freq + 0.5) + 1.0)
 
             for doc_id in matching_docs:
                 tf = self.doc_term_freqs[doc_id][token]
                 doc_len = self.doc_lengths[doc_id]
-                
-                # BM25 term weight
                 denom = tf + k1 * (1.0 - b + b * (doc_len / avg_dl))
                 term_score = idf * (tf * (k1 + 1.0)) / denom
                 scores[doc_id] += term_score
@@ -165,9 +202,10 @@ class VectorStore:
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:k]
 
-    def hybrid_search(self, query_vector: list[float], query_text: str, k: int = 5, rrf_k: int = 60, metric: str = "cosine") -> list[dict]:
-        """Hybrid search combining vector and keyword results via Reciprocal Rank Fusion (RRF)."""
-        vector_res = self.search(query_vector, k=k*2, metric=metric)
+    def hybrid_search(self, query_vector: list[float], query_text: str, k: int = 5, 
+                      rrf_k: int = 60, metric: str = "cosine", backend: str = "exact") -> list[dict]:
+        """Hybrid search combining vector search (exact or HNSW) and keyword search via RRF."""
+        vector_res = self.search(query_vector, k=k*2, metric=metric, backend=backend)
         keyword_res = self.keyword_search(query_text, k=k*2)
 
         rrf_scores = defaultdict(float)
@@ -191,7 +229,6 @@ class VectorStore:
         return combined_results[:k]
 
     def save_to_json(self, filepath: str):
-        """Serialize state to JSON file."""
         data = {
             doc_id: {
                 "vector": self.vectors[doc_id],
@@ -203,7 +240,6 @@ class VectorStore:
             json.dump(data, f, indent=2)
 
     def load_from_json(self, filepath: str):
-        """Load state from JSON file and rebuild inverted index."""
         with open(filepath, "r") as f:
             data = json.load(f)
         
@@ -217,8 +253,7 @@ class VectorStore:
             self.add(doc_id, payload["vector"], payload.get("metadata"))
 
     @classmethod
-    def from_json(cls, filepath: str):
-        """Factory method to construct instance directly from JSON file."""
-        store = cls()
+    def from_json(cls, filepath: str, use_hnsw: bool = False, hnsw_kwargs: dict = None):
+        store = cls(use_hnsw=use_hnsw, hnsw_kwargs=hnsw_kwargs)
         store.load_from_json(filepath)
         return store
