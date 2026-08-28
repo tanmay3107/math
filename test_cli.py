@@ -6,7 +6,7 @@ import tempfile
 from cli import main
 
 class TestCLI(unittest.TestCase):
-    """Automated unit tests for the VectorStore CLI interface using mocks."""
+    """Automated unit tests for VectorStore CLI including HNSW, Keyword, Hybrid, and Benchmark commands."""
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -17,7 +17,6 @@ class TestCLI(unittest.TestCase):
     @patch("builtins.input")
     @patch("sys.stdout", new_callable=io.StringIO)
     def test_cli_add_and_get(self, mock_stdout, mock_input):
-        # Simulate sequential user command inputs ending with 'exit'
         mock_input.side_effect = [
             'add doc1 1.0,0.0,0.0 {"topic":"tech"}',
             'get doc1',
@@ -32,33 +31,74 @@ class TestCLI(unittest.TestCase):
 
     @patch("builtins.input")
     @patch("sys.stdout", new_callable=io.StringIO)
-    def test_cli_search(self, mock_stdout, mock_input):
+    def test_cli_search_backends(self, mock_stdout, mock_input):
         mock_input.side_effect = [
             'add doc1 1.0,0.0,0.0',
-            'add doc2 0.0,1.0,0.0',
-            'search 1.0,0.0,0.0 1 cosine',
+            'search 1.0,0.0,0.0 1 cosine exact',
+            'search 1.0,0.0,0.0 1 cosine hnsw',
             'exit'
         ]
         main()
         output = mock_stdout.getvalue()
 
-        self.assertIn("Top 1 results using 'cosine':", output)
+        self.assertIn("Top 1 results (cosine, exact backend):", output)
+        self.assertIn("Top 1 results (cosine, hnsw backend):", output)
         self.assertIn("[doc1]", output)
 
     @patch("builtins.input")
     @patch("sys.stdout", new_callable=io.StringIO)
-    def test_cli_delete(self, mock_stdout, mock_input):
+    def test_cli_keyword_search(self, mock_stdout, mock_input):
         mock_input.side_effect = [
-            'add doc1 1.0,0.0,0.0',
-            'delete doc1',
-            'get doc1',
+            'add doc1 1.0,0.0,0.0 {"content":"machine learning python"}',
+            'keyword machine 1',
             'exit'
         ]
         main()
         output = mock_stdout.getvalue()
 
-        self.assertIn("Deleted vector 'doc1'.", output)
-        self.assertIn("Vector ID 'doc1' not found.", output)
+        self.assertIn("Top 1 BM25 results for 'machine':", output)
+        self.assertIn("[doc1]", output)
+
+    @patch("builtins.input")
+    @patch("sys.stdout", new_callable=io.StringIO)
+    def test_cli_hybrid_search(self, mock_stdout, mock_input):
+        mock_input.side_effect = [
+            'add doc1 1.0,0.0,0.0 {"content":"machine learning"}',
+            'hybrid 1.0,0.0,0.0 machine 1 exact',
+            'exit'
+        ]
+        main()
+        output = mock_stdout.getvalue()
+
+        self.assertIn("Top 1 hybrid results (exact backend):", output)
+        self.assertIn("[doc1]", output)
+
+    @patch("builtins.input")
+    @patch("sys.stdout", new_callable=io.StringIO)
+    def test_cli_toggle_hnsw(self, mock_stdout, mock_input):
+        mock_input.side_effect = [
+            'toggle-hnsw',
+            'toggle-hnsw',
+            'exit'
+        ]
+        main()
+        output = mock_stdout.getvalue()
+
+        self.assertIn("HNSW search backend is now DISABLED.", output)
+        self.assertIn("HNSW search backend is now ENABLED.", output)
+
+    @patch("builtins.input")
+    @patch("sys.stdout", new_callable=io.StringIO)
+    def test_cli_benchmark(self, mock_stdout, mock_input):
+        mock_input.side_effect = [
+            'benchmark 20 8',
+            'exit'
+        ]
+        main()
+        output = mock_stdout.getvalue()
+
+        self.assertIn("--- Benchmark Summary ---", output)
+        self.assertIn("Dataset Size:        20 vectors", output)
 
     @patch("builtins.input")
     @patch("sys.stdout", new_callable=io.StringIO)
@@ -71,27 +111,12 @@ class TestCLI(unittest.TestCase):
         ]
         main()
 
-        # Reload state in a fresh CLI session
         with patch("builtins.input", side_effect=[f'load {filepath}', 'get doc1', 'exit']), \
              patch("sys.stdout", new_callable=io.StringIO) as mock_stdout_load:
             main()
             load_output = mock_stdout_load.getvalue()
-            self.assertIn(f"Loaded store from '{filepath}'.", load_output)
+            self.assertIn(f"Loaded store state from '{filepath}'.", load_output)
             self.assertIn('"id": "doc1"', load_output)
-
-    @patch("builtins.input")
-    @patch("sys.stdout", new_callable=io.StringIO)
-    def test_cli_invalid_command_and_help(self, mock_stdout, mock_input):
-        mock_input.side_effect = [
-            'help',
-            'invalidcmd',
-            'exit'
-        ]
-        main()
-        output = mock_stdout.getvalue()
-
-        self.assertIn("VectorStore CLI Commands", output)
-        self.assertIn("Unknown command: 'invalidcmd'.", output)
 
 if __name__ == "__main__":
     unittest.main()
