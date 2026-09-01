@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  vectorstore-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vectorstore_api
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+    volumes:
+      - store_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  store_data:
